@@ -22,14 +22,28 @@ if (!PRIVATE_KEY) {
 
 // ── 개인키 형식 자동 정리 ────────────────────────
 let cleanKey = PRIVATE_KEY.trim().replace(/\s+/g, '');
-// 0x 중복 제거
-while (cleanKey.toLowerCase().startsWith('0x0x')) {
-  cleanKey = cleanKey.slice(2);
+
+// 슬래시 제거 (Zypto가 /key/ 형태로 감싸는 경우)
+cleanKey = cleanKey.replace(/^\/+|\/+$/g, '');
+
+// Base64 형식인지 확인 (+ 또는 / 또는 = 포함)
+const isBase64 = /[+/=]/.test(cleanKey) && !/^0x/i.test(cleanKey);
+if (isBase64) {
+  console.log('🔄 Base64 개인키 감지 → hex 변환');
+  try {
+    const buf = Buffer.from(cleanKey, 'base64');
+    cleanKey = '0x' + buf.toString('hex');
+  } catch(e) {
+    console.error('❌ Base64 변환 실패:', e.message);
+    process.exit(1);
+  }
+} else {
+  // 0x 중복 제거
+  while (cleanKey.toLowerCase().startsWith('0x0x')) cleanKey = cleanKey.slice(2);
+  // 0x 없으면 붙이기
+  if (!cleanKey.startsWith('0x') && !cleanKey.startsWith('0X')) cleanKey = '0x' + cleanKey;
 }
-// 0x 없으면 붙이기
-if (!cleanKey.startsWith('0x') && !cleanKey.startsWith('0X')) {
-  cleanKey = '0x' + cleanKey;
-}
+
 console.log('🔑 키 길이:', cleanKey.length, '(정상: 66자리)');
 
 // ── Provider / Wallet ────────────────────────────
