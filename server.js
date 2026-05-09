@@ -20,9 +20,21 @@ if (!PRIVATE_KEY) {
   process.exit(1);
 }
 
+// ── 개인키 형식 자동 정리 ────────────────────────
+let cleanKey = PRIVATE_KEY.trim().replace(/\s+/g, '');
+// 0x 중복 제거
+while (cleanKey.toLowerCase().startsWith('0x0x')) {
+  cleanKey = cleanKey.slice(2);
+}
+// 0x 없으면 붙이기
+if (!cleanKey.startsWith('0x') && !cleanKey.startsWith('0X')) {
+  cleanKey = '0x' + cleanKey;
+}
+console.log('🔑 키 길이:', cleanKey.length, '(정상: 66자리)');
+
 // ── Provider / Wallet ────────────────────────────
 const provider = new ethers.providers.JsonRpcProvider(ETN_RPC);
-const wallet   = new ethers.Wallet(PRIVATE_KEY, provider);
+const wallet   = new ethers.Wallet(cleanKey, provider);
 console.log('✅ 보상 지갑:', wallet.address);
 
 // ── 하루 클레임 카운터 ────────────────────────────
