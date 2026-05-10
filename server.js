@@ -9,8 +9,8 @@ app.use(cors());
 
 // ── ETN Smart Chain RPC ───────────────────────────
 const RPC_URLS = [
+  'https://rpc.ankr.com/electroneum',
   'https://rpc.electroneum.com',
-  'https://api.electroneum.com/v2',
   'https://etn.llamarpc.com',
 ];
 
