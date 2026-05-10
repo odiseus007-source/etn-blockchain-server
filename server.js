@@ -1,152 +1,154 @@
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
 const { ethers } = require('ethers');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ── ETN Smart Chain 설정 ──────────────────────────
+// ── ETN Smart Chain ───────────────────────────────
 const ETN_RPC = 'https://rpc.electroneum.com';
 
-// ── 환경변수 ─────────────────────────────────────
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const MAX_DAILY   = parseInt(process.env.MAX_DAILY || '3');
-const MAX_ETN_PER_CLAIM = parseInt(process.env.MAX_ETN || '10');
+// ── 환경변수 ──────────────────────────────────────
+const PRIVATE_KEY       = process.env.PRIVATE_KEY;
+const MAX_DAILY         = parseInt(process.env.MAX_DAILY || '3');
+const MAX_ETN_PER_CLAIM = parseInt(process.env.MAX_ETN   || '10');
 
 if (!PRIVATE_KEY) {
-  console.error('❌ PRIVATE_KEY 환경변수가 없습니다!');
+  console.error('❌ PRIVATE_KEY 없음');
   process.exit(1);
 }
 
-// ── 개인키 형식 자동 정리 ────────────────────────
-let cleanKey = PRIVATE_KEY.trim().replace(/\s+/g, '');
+// ── 개인키 정리 (Base64 자동 변환) ───────────────
+function prepareKey(raw) {
+  // 공백·줄바꿈 제거
+  let k = raw.trim().replace(/[\r\n\s]/g, '');
 
-// 슬래시 제거 (Zypto가 /key/ 형태로 감싸는 경우)
-cleanKey = cleanKey.replace(/^\/+|\/+$/g, '');
-
-// Base64 형식인지 확인 (+ 또는 / 또는 = 포함)
-const isBase64 = /[+/=]/.test(cleanKey) && !/^0x/i.test(cleanKey);
-if (isBase64) {
-  console.log('🔄 Base64 개인키 감지 → hex 변환');
-  try {
-    const buf = Buffer.from(cleanKey, 'base64');
-    cleanKey = '0x' + buf.toString('hex');
-  } catch(e) {
-    console.error('❌ Base64 변환 실패:', e.message);
-    process.exit(1);
+  // 이미 hex 64자리면 그대로
+  const hexOnly = k.replace(/^0x/i, '');
+  if (/^[0-9a-fA-F]{64}$/.test(hexOnly)) {
+    console.log('✅ hex 개인키');
+    return '0x' + hexOnly;
   }
-} else {
-  // 0x 중복 제거
-  while (cleanKey.toLowerCase().startsWith('0x0x')) cleanKey = cleanKey.slice(2);
-  // 0x 없으면 붙이기
-  if (!cleanKey.startsWith('0x') && !cleanKey.startsWith('0X')) cleanKey = '0x' + cleanKey;
+
+  // Base64 → Buffer → hex
+  console.log('🔄 Base64 변환 시도, 입력길이:', k.length);
+  const buf = Buffer.from(k, 'base64');
+  console.log('변환 결과 바이트:', buf.length);
+
+  if (buf.length === 32) {
+    return '0x' + buf.toString('hex');
+  }
+  // 33바이트면 앞 1바이트 제거 (prefix)
+  if (buf.length === 33) {
+    return '0x' + buf.slice(1).toString('hex');
+  }
+  // 그 외 마지막 32바이트 사용
+  if (buf.length > 32) {
+    return '0x' + buf.slice(buf.length - 32).toString('hex');
+  }
+
+  throw new Error('개인키 변환 실패: ' + buf.length + '바이트');
 }
 
-console.log('🔑 키 길이:', cleanKey.length, '(정상: 66자리)');
+let cleanKey;
+try {
+  cleanKey = prepareKey(PRIVATE_KEY);
+  console.log('🔑 키 길이:', cleanKey.length, '(정상 66)');
+} catch(e) {
+  console.error('❌ 키 처리 실패:', e.message);
+  process.exit(1);
+}
 
-// ── Provider / Wallet ────────────────────────────
+// ── Provider / Wallet ─────────────────────────────
 const provider = new ethers.providers.JsonRpcProvider(ETN_RPC);
 const wallet   = new ethers.Wallet(cleanKey, provider);
 console.log('✅ 보상 지갑:', wallet.address);
 
 // ── 하루 클레임 카운터 ────────────────────────────
 let claimLog = {};
-
-function todayKey(address) {
-  return address.toLowerCase() + '_' + new Date().toISOString().slice(0, 10);
+function todayKey(addr) {
+  return addr.toLowerCase() + '_' + new Date().toISOString().slice(0, 10);
 }
-function getDailyClaims(address) { return claimLog[todayKey(address)] || 0; }
-function addClaim(address) {
-  const k = todayKey(address);
+function getClaims(addr)  { return claimLog[todayKey(addr)] || 0; }
+function addClaim(addr)   {
+  const k = todayKey(addr);
   claimLog[k] = (claimLog[k] || 0) + 1;
 }
-// 매시간 오래된 로그 정리
 setInterval(() => {
   const today = new Date().toISOString().slice(0, 10);
   Object.keys(claimLog).forEach(k => { if (!k.includes(today)) delete claimLog[k]; });
 }, 3600000);
 
-// ── 잔액 조회 ────────────────────────────────────
+// ── 잔액 조회 ─────────────────────────────────────
 async function getBalance() {
   const bal = await provider.getBalance(wallet.address);
   return parseFloat(ethers.utils.formatEther(bal));
 }
 
-// ── ETN 전송 ─────────────────────────────────────
-async function sendETN(toAddress, amount) {
-  const amountWei = ethers.utils.parseEther(amount.toString());
-  const balance   = await provider.getBalance(wallet.address);
-  if (balance.lt(amountWei)) throw new Error('보상 지갑 잔액 부족');
-
-  const tx = await wallet.sendTransaction({
-    to: toAddress,
-    value: amountWei,
-    gasLimit: 21000,
-  });
-  console.log(`📤 전송: ${amount} ETN → ${toAddress} | tx: ${tx.hash}`);
+// ── ETN 전송 ──────────────────────────────────────
+async function sendETN(to, amount) {
+  const value   = ethers.utils.parseEther(amount.toString());
+  const balance = await provider.getBalance(wallet.address);
+  if (balance.lt(value)) throw new Error('잔액 부족');
+  const tx      = await wallet.sendTransaction({ to, value, gasLimit: 21000 });
+  console.log('📤 전송:', amount, 'ETN →', to, '| tx:', tx.hash);
   const receipt = await tx.wait();
-  console.log(`✅ 완료: ${receipt.transactionHash}`);
+  console.log('✅ 완료:', receipt.transactionHash);
   return receipt.transactionHash;
 }
 
-// ── 라우트 ───────────────────────────────────────
-
-// 헬스체크
+// ── 라우트 ────────────────────────────────────────
 app.get('/health', async (req, res) => {
   try {
-    const balance = await getBalance();
-    res.json({ status: 'ok', wallet: wallet.address, balance: balance.toFixed(2) + ' ETN' });
-  } catch (e) {
+    const bal = await getBalance();
+    res.json({ status: 'ok', wallet: wallet.address, balance: bal.toFixed(2) + ' ETN' });
+  } catch(e) {
     res.status(500).json({ status: 'error', message: e.message });
   }
 });
 
-// 풀 정보
 app.get('/pool-info', async (req, res) => {
   try {
-    const balance = await getBalance();
-    res.json({ success: true, poolEtn: Math.floor(balance * 10) / 10, online: Math.floor(Math.random() * 20) + 3 });
-  } catch (e) {
+    const bal = await getBalance();
+    res.json({ success: true, poolEtn: Math.floor(bal * 10) / 10, online: Math.floor(Math.random() * 20) + 3 });
+  } catch(e) {
     res.json({ success: false, poolEtn: 0, online: 1 });
   }
 });
 
-// ETN 전송
 app.post('/send-etn', async (req, res) => {
-  const { address, amount, score, lines } = req.body;
+  const { address, amount, lines } = req.body;
 
   if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address))
-    return res.status(400).json({ success: false, message: '올바른 ETN 주소가 아닙니다 (0x로 시작)' });
+    return res.status(400).json({ success: false, message: '올바른 ETN 주소가 아닙니다 (0x로 시작하는 주소 필요)' });
 
-  const etnAmount = parseInt(amount);
-  if (!etnAmount || etnAmount <= 0)
+  const amt = parseInt(amount);
+  if (!amt || amt <= 0)
     return res.status(400).json({ success: false, message: '전송할 ETN이 없습니다' });
 
-  if (etnAmount > MAX_ETN_PER_CLAIM)
+  if (amt > MAX_ETN_PER_CLAIM)
     return res.status(400).json({ success: false, message: `최대 ${MAX_ETN_PER_CLAIM} ETN까지 가능합니다` });
 
-  if (getDailyClaims(address) >= MAX_DAILY)
+  if (getClaims(address) >= MAX_DAILY)
     return res.status(429).json({ success: false, message: `하루 최대 ${MAX_DAILY}회까지 가능합니다` });
 
-  if (lines < etnAmount * 10)
+  if ((lines || 0) < amt * 10)
     return res.status(400).json({ success: false, message: '게임 기록과 ETN 수량이 맞지 않습니다' });
 
   try {
-    console.log(`🎮 클레임: ${address} | ${etnAmount} ETN | 줄:${lines}`);
-    const txHash = await sendETN(address, etnAmount.toString());
+    const txHash = await sendETN(address, amt.toString());
     addClaim(address);
-    res.json({ success: true, txHash, message: `${etnAmount} ETN 전송 완료!` });
-  } catch (e) {
-    console.error('❌ 실패:', e.message);
+    res.json({ success: true, txHash, message: `${amt} ETN 전송 완료!` });
+  } catch(e) {
+    console.error('❌ 전송 실패:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
 
-// ── 시작 ─────────────────────────────────────────
+// ── 시작 ──────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 서버 실행중 포트 ${PORT}`);
-  console.log(`💰 지갑: ${wallet.address}`);
+  console.log('🚀 서버 실행중 포트', PORT);
 });
