@@ -7,8 +7,26 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ── ETN Smart Chain ───────────────────────────────
-const ETN_RPC = 'https://rpc.electroneum.com';
+// ── ETN Smart Chain RPC ───────────────────────────
+const RPC_URLS = [
+  'https://rpc.electroneum.com',
+  'https://api.electroneum.com/v2',
+  'https://etn.llamarpc.com',
+];
+
+async function getProvider() {
+  for (const url of RPC_URLS) {
+    try {
+      const p = new ethers.providers.JsonRpcProvider(url);
+      await p.getNetwork();
+      console.log('✅ RPC 연결 성공:', url);
+      return p;
+    } catch(e) {
+      console.log('❌ RPC 실패:', url, e.message);
+    }
+  }
+  throw new Error('모든 RPC 연결 실패');
+}
 
 // ── 환경변수 ──────────────────────────────────────
 const PRIVATE_KEY       = process.env.PRIVATE_KEY;
@@ -62,9 +80,18 @@ try {
 }
 
 // ── Provider / Wallet ─────────────────────────────
-const provider = new ethers.providers.JsonRpcProvider(ETN_RPC);
-const wallet   = new ethers.Wallet(cleanKey, provider);
-console.log('✅ 보상 지갑:', wallet.address);
+let provider, wallet;
+
+async function initWallet() {
+  provider = await getProvider();
+  wallet   = new ethers.Wallet(cleanKey, provider);
+  console.log('✅ 보상 지갑:', wallet.address);
+}
+
+initWallet().catch(e => {
+  console.error('❌ 지갑 초기화 실패:', e.message);
+  process.exit(1);
+});
 
 // ── 하루 클레임 카운터 ────────────────────────────
 let claimLog = {};
@@ -83,12 +110,14 @@ setInterval(() => {
 
 // ── 잔액 조회 ─────────────────────────────────────
 async function getBalance() {
+  if (!provider) throw new Error('서버 초기화 중');
   const bal = await provider.getBalance(wallet.address);
   return parseFloat(ethers.utils.formatEther(bal));
 }
 
 // ── ETN 전송 ──────────────────────────────────────
 async function sendETN(to, amount) {
+  if (!wallet) throw new Error('서버 초기화 중');
   const value   = ethers.utils.parseEther(amount.toString());
   const balance = await provider.getBalance(wallet.address);
   if (balance.lt(value)) throw new Error('잔액 부족');
