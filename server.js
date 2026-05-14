@@ -128,6 +128,39 @@ async function sendETN(to, amount) {
   return receipt.transactionHash;
 }
 
+// ── 데이터 증명 기록 ──────────────────────────────
+// ETN 트랜잭션 data 필드에 해시를 넣어 영구 기록
+async function recordOnChain(hash, meta) {
+  if (!wallet) throw new Error('서버 초기화 중');
+
+  // 증명 패킷 구성 (최대 100바이트)
+  const packet = JSON.stringify({
+    h: hash.slice(0, 20),     // 해시 앞부분 (짧게)
+    t: meta.dataType || 'data',
+    o: (meta.owner || 'anon').slice(0, 20),
+    ts: Math.floor(Date.now() / 1000)
+  });
+
+  // hex 인코딩
+  const dataHex = '0x' + Buffer.from(packet, 'utf8').toString('hex');
+
+  // 자기 자신에게 0 ETN 전송 + data 필드에 해시 기록
+  const tx = await wallet.sendTransaction({
+    to: wallet.address,   // 자신에게 전송 (ETN 0개)
+    value: 0,
+    data: dataHex,
+    gasLimit: 50000       // data 포함이라 조금 더 필요
+  });
+
+  console.log('📝 증명 기록:', hash.slice(0,16), '| tx:', tx.hash);
+  const receipt = await tx.wait();
+  console.log('✅ 블록 확인:', receipt.transactionHash, '| 블록:', receipt.blockNumber);
+  return {
+    txHash: receipt.transactionHash,
+    blockNumber: receipt.blockNumber
+  };
+}
+
 // ── 라우트 ────────────────────────────────────────
 app.get('/health', async (req, res) => {
   try {
@@ -144,6 +177,78 @@ app.get('/pool-info', async (req, res) => {
     res.json({ success: true, poolEtn: Math.floor(bal * 10) / 10, online: Math.floor(Math.random() * 20) + 3 });
   } catch(e) {
     res.json({ success: false, poolEtn: 0, online: 1 });
+  }
+});
+
+// ── 데이터 증명 API ───────────────────────────────
+app.post('/certify', async (req, res) => {
+  const { hash, dataType, owner, description, size } = req.body;
+
+  // 입력 검증
+  if (!hash || typeof hash !== 'string')
+    return res.status(400).json({ success: false, message: 'hash가 없습니다' });
+
+  if (!/^[0-9a-fA-F]{64}$/.test(hash))
+    return res.status(400).json({ success: false, message: '올바른 SHA-256 hash가 아닙니다 (64자리 hex)' });
+
+  try {
+    console.log('🔐 증명 요청:', hash.slice(0,16), '| 유형:', dataType, '| 소유자:', owner);
+
+    const result = await recordOnChain(hash, { dataType, owner, description });
+
+    const cert = {
+      success: true,
+      certId: result.txHash,
+      txHash: result.txHash,
+      blockNumber: result.blockNumber,
+      hash: hash,
+      dataType: dataType || 'unknown',
+      owner: owner || 'anonymous',
+      description: description || '',
+      size: size || 'unknown',
+      timestamp: new Date().toISOString(),
+      network: 'ETN Smart Chain',
+      explorerUrl: `https://blockexplorer.electroneum.com/tx/${result.txHash}`,
+      fee: '< $0.0001'
+    };
+
+    console.log('✅ 증명 완료:', result.txHash);
+    res.json(cert);
+
+  } catch(e) {
+    console.error('❌ 증명 실패:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// ── 증명서 조회 API ───────────────────────────────
+app.get('/verify/:txHash', async (req, res) => {
+  const { txHash } = req.params;
+  try {
+    const tx = await provider.getTransaction(txHash);
+    if (!tx) return res.status(404).json({ success: false, message: '트랜잭션을 찾을 수 없습니다' });
+
+    const receipt = await provider.getTransactionReceipt(txHash);
+    const block   = await provider.getBlock(receipt.blockNumber);
+
+    // data 필드에서 증명 패킷 추출
+    let certData = null;
+    try {
+      const decoded = Buffer.from(tx.data.slice(2), 'hex').toString('utf8');
+      certData = JSON.parse(decoded);
+    } catch(e) { /* data 없거나 다른 형식 */ }
+
+    res.json({
+      success: true,
+      txHash,
+      blockNumber: receipt.blockNumber,
+      timestamp: new Date(block.timestamp * 1000).toISOString(),
+      from: tx.from,
+      certData,
+      explorerUrl: `https://blockexplorer.electroneum.com/tx/${txHash}`
+    });
+  } catch(e) {
+    res.status(500).json({ success: false, message: e.message });
   }
 });
 
